@@ -1,0 +1,15 @@
+# Konfiguration fuer die Issue-Template-Auswahl
+# Diese Datei steuert, welche Optionen im "New Issue"-Dialog angezeigt werden.
+
+blank_issues_enabled: true
+
+# Hinweis: contact_links verlangen eine absolute https-URL. Da dieses Repo per
+# "Use this template" kopiert wird und der Owner/Repo-Name vorher nicht bekannt
+# ist, koennen wir hier keinen funktionierenden Link fest verdrahten. Deshalb
+# bleibt die Liste leer. Wer mag, traegt nach dem Erstellen seines Repos die
+# eigene TROUBLESHOOTING-URL ein, z.B.:
+#   contact_links:
+#     - name: "Hilfe bei Problemen"
+#       url: "https://github.com/<owner>/<repo>/blob/main/docs/TROUBLESHOOTING.md"
+#       about: "Schau zuerst in die Troubleshooting-Doku."
+contact_links: []

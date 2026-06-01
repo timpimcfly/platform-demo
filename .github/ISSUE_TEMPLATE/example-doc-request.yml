@@ -1,0 +1,76 @@
+# Issue-Formular: Doku-Vorlage anfordern
+# Dieses Formular erzeugt ein strukturiertes Issue, das vom Workflow
+# .github/workflows/example-doc-handler.yml automatisch verarbeitet wird.
+
+name: "Doku-Vorlage anfordern"
+description: "Erzeuge eine neue Markdown-Doku-Vorlage fuer einen Service"
+title: "[Doku-Anfrage] "
+labels: ["doku-request", "automation"]
+
+body:
+  # Einleitender Text – wird im Formular angezeigt, aber nicht im Issue-Body gespeichert
+  - type: markdown
+    attributes:
+      value: |
+        ## Neue Doku-Vorlage anfordern
+        Fuellen Sie dieses Formular aus, um automatisch eine Dokumentationsvorlage
+        fuer Ihren Service erzeugen zu lassen. Der Workflow erstellt eine Markdown-Datei
+        in `generated-docs/` mit den Standardabschnitten.
+
+  # Service-Name: Wird als Dateiname und Ueberschrift verwendet
+  # WICHTIG: GitHub Issue Forms unterstuetzen KEINE Regex-Validierung. Das
+  # einzige unterstuetzte Validierungsfeld ist "required". Das Namensformat
+  # (Kleinbuchstaben + Bindestriche) wird daher im Workflow geprueft
+  # (Schritt "Eingaben validieren"), nicht hier.
+  - type: input
+    id: service_name
+    attributes:
+      label: "Service-Name"
+      description: "Eindeutiger Name des Services (nur Kleinbuchstaben und Bindestriche, z.B. mein-service)"
+      placeholder: "mein-service"
+    validations:
+      required: true
+
+  # Owner: Verantwortliche Person oder Team
+  - type: input
+    id: owner
+    attributes:
+      label: "Owner"
+      description: "GitHub-Username oder Teamname des Verantwortlichen"
+      placeholder: "team-plattform"
+    validations:
+      required: true
+
+  # Beschreibung: Freitextfeld fuer den Zweck des Services
+  - type: textarea
+    id: description
+    attributes:
+      label: "Beschreibung"
+      description: "Kurze Beschreibung, was der Service tut"
+      placeholder: |
+        Beispiel: Dieser Service stellt eine REST-API fuer die Nutzerverwaltung
+        bereit und kommuniziert mit der zentralen Datenbank.
+    validations:
+      required: true
+
+  # Umgebung: In welcher Umgebung wird der Service betrieben?
+  - type: dropdown
+    id: environment
+    attributes:
+      label: "Umgebung"
+      description: "Zielumgebung fuer die Dokumentation"
+      options:
+        - dev
+        - staging
+        - prod
+    validations:
+      required: true
+
+  # Bestaetigungen: Pflicht-Checkbox zur Datenrichtigkeit
+  - type: checkboxes
+    id: agreements
+    attributes:
+      label: "Bestaetigungen"
+      options:
+        - label: "Ich bestaetige, dass die Angaben korrekt sind."
+          required: true

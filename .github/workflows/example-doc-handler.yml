@@ -1,0 +1,203 @@
+# Workflow: Doku-Anfrage bearbeiten
+# Dieser Workflow wird automatisch ausgeloest, wenn ein Issue mit dem Label
+# "doku-request" geoeffnet wird. Er parst die Formularfelder aus dem Issue-Body,
+# erzeugt eine Doku-Datei aus der Vorlage und committet sie ins Repository.
+#
+# VORAUSSETZUNG: Unter Settings → Actions → General muss
+# "Read and write permissions" aktiviert sein.
+#
+# SICHERHEITSPRINZIP (wichtig als Lehrmaterial):
+# Werte aus dem Issue-Body sind NICHT vertrauenswuerdig (jeder kann ein Issue
+# oeffnen). Deshalb werden sie NIEMALS direkt per ${{ ... }} in ein run-Skript
+# eingesetzt – das waere eine Script-Injection-Luecke. Stattdessen reichen wir
+# sie ausschliesslich ueber env-Variablen weiter und referenzieren sie als
+# Shell-Variablen ("$VAR"), die die Shell nicht erneut als Code interpretiert.
+
+name: "Doku-Anfrage bearbeiten"
+
+# Trigger: Workflow startet, wenn ein Issue geoeffnet wird
+on:
+  issues:
+    types: [opened]
+
+# Berechtigungen: Der Workflow braucht Schreibzugriff auf Dateien (contents)
+# und Issues (um Kommentare zu schreiben und Labels zu setzen)
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  handle-doc-request:
+    # Nur ausfuehren, wenn das Issue das Label "doku-request" traegt
+    if: contains(github.event.issue.labels.*.name, 'doku-request')
+    runs-on: ubuntu-latest
+
+    steps:
+      # Schritt 1: Repository auschecken, damit wir auf Dateien zugreifen koennen
+      - name: Repository auschecken
+        uses: actions/checkout@v4
+
+      # Schritt 2: Felder aus dem Issue-Body extrahieren
+      # GitHub Issue Forms erzeugen einen strukturierten Body im Format:
+      # ### Label\n\nWert\n\n### Naechstes Label\n\nWert
+      # Wir nutzen sed um die Werte zu extrahieren.
+      #
+      # Der Issue-Body wird ueber die env-Variable ISSUE_BODY uebergeben (nicht
+      # per ${{ ... }} im Skript), damit kein Inhalt als Shell-Code ausgefuehrt wird.
+      - name: Issue-Body parsen
+        id: parse
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          # Hilfsfunktion: Extrahiert den Wert nach einem ### Header
+          extract_field() {
+            local field_name="$1"
+            echo "$ISSUE_BODY" | sed -n "/### ${field_name}/,/### /{/### ${field_name}/d;/### /d;p;}" | sed '/^$/d' | head -1
+          }
+
+          # Felder extrahieren
+          SERVICE_NAME=$(extract_field "Service-Name")
+          OWNER=$(extract_field "Owner")
+          ENVIRONMENT=$(extract_field "Umgebung")
+
+          # Werte in die GitHub Output-Datei schreiben (fuer nachfolgende Schritte)
+          echo "service_name=${SERVICE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "owner=${OWNER}" >> "$GITHUB_OUTPUT"
+          echo "environment=${ENVIRONMENT}" >> "$GITHUB_OUTPUT"
+
+          # Beschreibung kann mehrzeilig sein – spezielles Handling mit
+          # zufaelligem Heredoc-Delimiter, damit ein "EOF" im Text nicht
+          # die Output-Datei zerschiesst.
+          DELIM="DESC_$(openssl rand -hex 8)"
+          {
+            echo "description<<${DELIM}"
+            echo "$ISSUE_BODY" | sed -n "/### Beschreibung/,/### /{/### Beschreibung/d;/### /d;p;}" | sed '/^$/d'
+            echo "${DELIM}"
+          } >> "$GITHUB_OUTPUT"
+
+          # Debug-Ausgabe zur Kontrolle im Workflow-Log
+          echo "Extrahierte Werte:"
+          echo "  Service: ${SERVICE_NAME}"
+          echo "  Owner: ${OWNER}"
+          echo "  Umgebung: ${ENVIRONMENT}"
+
+      # Schritt 3: Eingaben validieren (Server-seitig!)
+      # GitHub Issue Forms koennen Eingaben NICHT per Regex validieren – das
+      # muss hier im Workflow passieren, bevor wir die Werte fuer Dateinamen
+      # oder Ersetzungen verwenden. Verhindert Path-Traversal und kaputte sed-Aufrufe.
+      - name: Eingaben validieren
+        env:
+          SERVICE_NAME: ${{ steps.parse.outputs.service_name }}
+          OWNER: ${{ steps.parse.outputs.owner }}
+        run: |
+          # Service-Name: nur Kleinbuchstaben, Ziffern, Bindestriche; beginnt mit Buchstabe
+          if [[ ! "$SERVICE_NAME" =~ ^[a-z][a-z0-9-]+$ ]]; then
+            echo "Ungueltiger Service-Name: '$SERVICE_NAME'" >&2
+            echo "INVALID=true" >> "$GITHUB_ENV"
+            echo "REASON=Der Service-Name darf nur Kleinbuchstaben, Ziffern und Bindestriche enthalten und muss mit einem Buchstaben beginnen." >> "$GITHUB_ENV"
+            exit 0
+          fi
+          # Owner: keine sed-/Shell-kritischen Sonderzeichen erlauben
+          if [[ ! "$OWNER" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "Ungueltiger Owner: '$OWNER'" >&2
+            echo "INVALID=true" >> "$GITHUB_ENV"
+            echo "REASON=Der Owner enthaelt unzulaessige Zeichen." >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "INVALID=false" >> "$GITHUB_ENV"
+
+      # Schritt 3b: Bei ungueltiger Eingabe Issue kommentieren und schliessen
+      - name: Ungueltige Eingabe melden
+        if: env.INVALID == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REASON: ${{ env.REASON }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --body "Anfrage abgelehnt: ${REASON}"
+          gh issue edit "$ISSUE_NUMBER" --add-label "invalid-input"
+          gh issue close "$ISSUE_NUMBER" --reason "not planned"
+
+      # Schritt 4: Doku-Datei aus Template erzeugen
+      # Alle Issue-Werte kommen ueber env (nicht ${{ }} im Skript). Die Ersetzung
+      # erfolgt mit Python (literal replace), damit Sonderzeichen wie / & \ in den
+      # Werten keine Probleme machen – im Gegensatz zu sed.
+      - name: Doku-Datei erzeugen
+        id: generate
+        if: env.INVALID == 'false'
+        env:
+          SERVICE_NAME: ${{ steps.parse.outputs.service_name }}
+          OWNER: ${{ steps.parse.outputs.owner }}
+          DESCRIPTION: ${{ steps.parse.outputs.description }}
+          ENVIRONMENT: ${{ steps.parse.outputs.environment }}
+        run: |
+          DATE=$(date +%Y-%m-%d)
+          export DATE
+
+          # Zieldatei – SERVICE_NAME ist in Schritt 3 validiert, kein Path-Traversal moeglich
+          OUTPUT_FILE="generated-docs/${SERVICE_NAME}.md"
+
+          # Platzhalter literal ersetzen (sicher gegen Sonderzeichen)
+          python3 - "$OUTPUT_FILE" <<'PY'
+          import os, sys
+          out = sys.argv[1]
+          with open("templates/doc-template.md", encoding="utf-8") as f:
+              content = f.read()
+          replacements = {
+              "{{service_name}}": os.environ["SERVICE_NAME"],
+              "{{owner}}": os.environ["OWNER"],
+              "{{description}}": os.environ["DESCRIPTION"],
+              "{{environment}}": os.environ["ENVIRONMENT"],
+              "{{date}}": os.environ["DATE"],
+          }
+          for key, value in replacements.items():
+              content = content.replace(key, value)
+          with open(out, "w", encoding="utf-8") as f:
+              f.write(content)
+          PY
+
+          echo "output_file=${OUTPUT_FILE}" >> "$GITHUB_OUTPUT"
+          echo "Datei erzeugt: ${OUTPUT_FILE}"
+
+      # Schritt 5: Datei committen und auf main pushen
+      # Die Commit-Message wird ueber env uebergeben, nicht per ${{ }} im Skript.
+      - name: Aenderungen committen und pushen
+        if: env.INVALID == 'false'
+        env:
+          SERVICE_NAME: ${{ steps.parse.outputs.service_name }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add generated-docs/
+          git commit -m "docs: Doku-Vorlage fuer ${SERVICE_NAME} erzeugt (Issue #${ISSUE_NUMBER})"
+          git push
+
+      # Schritt 6: Bestaetigung als Kommentar ans Issue schreiben
+      - name: Issue kommentieren
+        if: env.INVALID == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          OUTPUT_FILE: ${{ steps.generate.outputs.output_file }}
+          SERVER_URL: ${{ github.server_url }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          FILE_URL="${SERVER_URL}/${REPOSITORY}/blob/main/${OUTPUT_FILE}"
+          gh issue comment "$ISSUE_NUMBER" \
+            --body "Doku-Vorlage erzeugt: [${OUTPUT_FILE}](${FILE_URL})
+
+          Die Datei wurde auf \`main\` committet und ist ab sofort verfuegbar."
+
+      # Schritt 7: Issue mit Label "completed" versehen und schliessen
+      - name: Issue abschliessen
+        if: env.INVALID == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          # Label "completed" hinzufuegen. WICHTIG: Das Label muss im Repo bereits
+          # existieren – gh erstellt fehlende Labels NICHT. Siehe README Schritt 3.
+          gh issue edit "$ISSUE_NUMBER" --add-label "completed"
+          # Issue schliessen mit dem Grund "completed"
+          gh issue close "$ISSUE_NUMBER" --reason "completed"
